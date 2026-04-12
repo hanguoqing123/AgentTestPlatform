@@ -109,15 +109,21 @@ public class LlmService {
 
         String bodyJson = objectMapper.writeValueAsString(requestBody);
 
+        // 自动拼接 /chat/completions，兼容配置了完整路径或只配了 base URL 的情况
+        String apiUrl = llmConfig.getApiUrl().replaceAll("/+$", "");
+        if (!apiUrl.endsWith("/chat/completions")) {
+            apiUrl = apiUrl + "/chat/completions";
+        }
+
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(llmConfig.getApiUrl()))
+                .uri(URI.create(apiUrl))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + llmConfig.getApiKey())
                 .timeout(Duration.ofSeconds(120))
                 .POST(HttpRequest.BodyPublishers.ofString(bodyJson))
                 .build();
 
-        log.info("Calling LLM API: {} with model: {}", llmConfig.getApiUrl(), llmConfig.getModel());
+        log.info("Calling LLM API: {} with model: {}", apiUrl, llmConfig.getModel());
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 

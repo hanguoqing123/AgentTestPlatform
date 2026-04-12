@@ -82,6 +82,12 @@ public class DatasetService {
     public DatasetMeta create(String name, String apiId, String description,
                               List<Map<String, Object>> data) throws IOException {
         Path dir = datasetsDir.resolve(name);
+
+        // 检查数据集名称是否已存在
+        if (Files.exists(dir.resolve("meta.json"))) {
+            throw new IllegalArgumentException("数据集名称重复：已存在同名数据集「" + name + "」");
+        }
+
         Files.createDirectories(dir);
 
         DatasetMeta meta = new DatasetMeta();
