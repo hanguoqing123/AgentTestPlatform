@@ -51,7 +51,7 @@ public class TestExecutionService {
                 );
                 emitter.send(SseEmitter.event()
                         .name("error")
-                        .data(objectMapper.writeValueAsString(errorEvent)));
+                        .data(errorEvent));
                 emitter.complete();
             } catch (Exception ex) {
                 emitter.completeWithError(ex);
@@ -166,10 +166,10 @@ public class TestExecutionService {
                         synchronized (emitter) {
                             emitter.send(SseEmitter.event()
                                     .name("progress")
-                                    .data(objectMapper.writeValueAsString(progressEvent)));
+                                    .data(progressEvent));
                             emitter.send(SseEmitter.event()
                                     .name("detail")
-                                    .data(objectMapper.writeValueAsString(detailEvent)));
+                                    .data(detailEvent));
                         }
                     } catch (Exception sendEx) {
                         log.warn("Failed to send SSE event for request {}: {}", index, sendEx.getMessage());
@@ -248,7 +248,7 @@ public class TestExecutionService {
         try {
             emitter.send(SseEmitter.event()
                     .name("complete")
-                    .data(objectMapper.writeValueAsString(completeEvent)));
+                    .data(completeEvent));
             emitter.complete();
         } catch (Exception e) {
             log.warn("Failed to send complete event: {}", e.getMessage());
@@ -265,6 +265,7 @@ public class TestExecutionService {
         detail.setRequestBody(body);
 
         for (int attempt = 0; attempt <= retries; attempt++) {
+            long requestStart = System.currentTimeMillis();
             try {
                 String bodyJson = objectMapper.writeValueAsString(body);
 
@@ -292,8 +293,6 @@ public class TestExecutionService {
                         reqBuilder.GET();
                         break;
                 }
-
-                long requestStart = System.currentTimeMillis();
 
                 if (isSse) {
                     // SSE 流式响应
@@ -339,7 +338,7 @@ public class TestExecutionService {
             } catch (Exception e) {
                 detail.setSuccess(false);
                 detail.setError(e.getClass().getSimpleName() + ": " + e.getMessage());
-                detail.setResponseTimeMs(System.currentTimeMillis());
+                detail.setResponseTimeMs(System.currentTimeMillis() - requestStart);
             }
 
             // 重试等待
