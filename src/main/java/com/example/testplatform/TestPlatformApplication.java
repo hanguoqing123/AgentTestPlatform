@@ -17,13 +17,17 @@ public class TestPlatformApplication {
     @Value("${app.data-dir:./data}")
     private String dataDir;
 
+    @Value("${server.port:8899}")
+    private int serverPort;
+
     public static void main(String[] args) {
         SpringApplication.run(TestPlatformApplication.class, args);
     }
 
     @Bean
-    public ApplicationRunner initDataDirectories() {
+    public ApplicationRunner init() {
         return args -> {
+            // 初始化数据目录
             String[] dirs = {"apis", "datasets", "reports"};
             for (String dir : dirs) {
                 Path path = Path.of(dataDir, dir);
@@ -31,6 +35,14 @@ public class TestPlatformApplication {
                     Files.createDirectories(path);
                 }
             }
+
+            // 输出访问地址
+            System.out.println();
+            System.out.println("==============================================");
+            System.out.println("  ⚡ AgentTestPlatform 启动成功！");
+            System.out.println("  访问地址: http://localhost:" + serverPort);
+            System.out.println("==============================================");
+            System.out.println();
         };
     }
 }

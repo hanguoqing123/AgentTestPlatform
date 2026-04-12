@@ -1,0 +1,9 @@
+
+    ___                    __  ______          __
+   /   | ____ ____  ____  / /_/_  __/__  _____/ /_
+  / /| |/ __ `/ _ \/ __ \/ __/ / / / _ \/ ___/ __/
+ / ___ / /_/ /  __/ / / / /_ / / /  __(__  ) /_
+/_/  |_\__, /\___/_/ /_/\__//_/  \___/____/\__/
+      /____/
+  ${AnsiColor.CYAN}:: AgentTestPlatform ::${AnsiColor.DEFAULT}  ${AnsiColor.BRIGHT_BLACK}v${application.version}${AnsiColor.DEFAULT}  ${AnsiColor.BRIGHT_BLACK}| Spring Boot ${spring-boot.version}${AnsiColor.DEFAULT}
+
