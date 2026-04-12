@@ -104,6 +104,7 @@ public class TestExecutionService {
         LocalDateTime startTime = LocalDateTime.now();
 
         int concurrency = Math.max(1, request.getConcurrency());
+        int requestIntervalMs = Math.max(0, request.getRequestInterval());
         ExecutorService executor = Executors.newFixedThreadPool(Math.min(concurrency, 20));
 
         Semaphore semaphore = new Semaphore(concurrency);
@@ -112,6 +113,16 @@ public class TestExecutionService {
         for (int i = 0; i < total; i++) {
             final int index = i;
             final Map<String, Object> body = dataset.get(i);
+
+            // 请求间隔控制：从第二个请求开始，提交前等待指定毫秒
+            if (requestIntervalMs > 0 && i > 0) {
+                try {
+                    Thread.sleep(requestIntervalMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
 
             executor.submit(() -> {
                 try {
