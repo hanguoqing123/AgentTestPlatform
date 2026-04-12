@@ -1,5 +1,3 @@
-# ⚡ AgentTestPlatform
-
 ## 快速开始
 
 ### 环境要求
