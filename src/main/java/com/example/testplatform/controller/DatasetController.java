@@ -40,6 +40,14 @@ public class DatasetController {
                 request.name, request.apiId, request.description, request.data);
     }
 
+    @PutMapping("/{name}")
+    public ResponseEntity<DatasetMeta> update(@PathVariable String name,
+                                               @RequestBody UpdateDatasetRequest request) throws IOException {
+        DatasetMeta updated = datasetService.update(
+                name, request.description, request.data, Boolean.TRUE.equals(request.append));
+        return updated != null ? ResponseEntity.ok(updated) : ResponseEntity.notFound().build();
+    }
+
     @DeleteMapping("/{name}")
     public ResponseEntity<Void> delete(@PathVariable String name) throws IOException {
         return datasetService.delete(name)
@@ -52,5 +60,11 @@ public class DatasetController {
         public String apiId;
         public String description;
         public List<Map<String, Object>> data;
+    }
+
+    public static class UpdateDatasetRequest {
+        public String description;
+        public List<Map<String, Object>> data;
+        public Boolean append;  // true=追加, false/null=替换
     }
 }

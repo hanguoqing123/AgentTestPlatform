@@ -9,6 +9,7 @@ public class DatasetMeta {
     private int count;
     private String description;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -24,4 +25,7 @@ public class DatasetMeta {
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+
+    public LocalDateTime getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
 }

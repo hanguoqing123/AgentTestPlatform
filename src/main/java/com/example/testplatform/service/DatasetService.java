@@ -99,6 +99,50 @@ public class DatasetService {
         return meta;
     }
 
+    /**
+     * 更新数据集：支持修改描述、替换数据、追加数据
+     */
+    public DatasetMeta update(String name, String description,
+                              List<Map<String, Object>> data, boolean append) throws IOException {
+        Path dir = datasetsDir.resolve(name);
+        Path metaFile = dir.resolve("meta.json");
+        Path dataFile = dir.resolve("data.json");
+
+        if (!Files.exists(metaFile)) return null;
+
+        DatasetMeta meta = objectMapper.readValue(metaFile.toFile(), DatasetMeta.class);
+
+        // 更新描述
+        if (description != null) {
+            meta.setDescription(description);
+        }
+
+        // 处理数据：追加或替换
+        if (data != null) {
+            List<Map<String, Object>> finalData;
+            if (append && Files.exists(dataFile)) {
+                // 追加模式：合并已有数据和新数据
+                List<Map<String, Object>> existing = objectMapper.readValue(dataFile.toFile(),
+                        new TypeReference<List<Map<String, Object>>>() {});
+                existing.addAll(data);
+                finalData = existing;
+            } else {
+                // 替换模式
+                finalData = data;
+            }
+            meta.setCount(finalData.size());
+            objectMapper.writerWithDefaultPrettyPrinter()
+                    .writeValue(dataFile.toFile(), finalData);
+        }
+
+        // 更新 updatedAt
+        meta.setUpdatedAt(LocalDateTime.now());
+        objectMapper.writerWithDefaultPrettyPrinter()
+                .writeValue(metaFile.toFile(), meta);
+
+        return meta;
+    }
+
     public boolean delete(String name) throws IOException {
         Path dir = datasetsDir.resolve(name);
         if (!Files.exists(dir)) return false;
