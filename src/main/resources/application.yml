@@ -2,6 +2,8 @@ server:
   port: 8899
 
 spring:
+  profiles:
+    active: local
   jackson:
     serialization:
       indent-output: true
@@ -10,9 +12,10 @@ spring:
 app:
   data-dir: ./data
 
+  # 大模型配置（通过环境变量或本地 application-local.yml 配置）
   llm:
-    api-url: ${LLM_API_URL:https://maas.devops.xiaohongshu.com/v1/chat/completions}
-    api-key: ${LLM_API_KEY:QSTdde1351e160380c58908404509d9fea4}
+    api-url: ${LLM_API_URL:}
+    api-key: ${LLM_API_KEY:}
     model: ${LLM_MODEL:qwen3-vl-235b-a22b-instruct}
     max-tokens: 16384
     temperature: 0.9

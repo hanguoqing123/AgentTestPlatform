@@ -40,3 +40,6 @@ frontend/dist/
 
 ### Data ###
 data/
+
+### Local Config (sensitive) ###
+**/application-local.yml
