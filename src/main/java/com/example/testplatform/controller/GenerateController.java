@@ -52,9 +52,41 @@ public class GenerateController {
         }
     }
 
+    /**
+     * AI 对话式修改数据集（大数据集自动分批处理）
+     */
+    @PostMapping("/refine")
+    public ResponseEntity<?> refine(@RequestBody RefineRequest request) {
+        try {
+            if (request.data == null || request.data.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "当前数据不能为空"));
+            }
+            if (request.instruction == null || request.instruction.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "请输入修改指令"));
+            }
+
+            LlmService.RefineResult result = llmService.refineData(request.data, request.instruction);
+
+            Map<String, Object> response = new java.util.LinkedHashMap<>();
+            response.put("data", result.getData());
+            response.put("count", result.getData().size());
+            response.put("batched", result.isBatched());
+            response.put("totalBatches", result.getTotalBatches());
+
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     public static class GenerateRequest {
         public String apiId;
         public String scenario;
         public int count = 10;
+    }
+
+    public static class RefineRequest {
+        public List<Map<String, Object>> data;
+        public String instruction;
     }
 }
