@@ -1,0 +1,19 @@
+server:
+  port: 8899
+
+spring:
+  jackson:
+    serialization:
+      indent-output: true
+    default-property-inclusion: non_null
+
+app:
+  data-dir: ./data
+
+  # 大模型配置（小红书 DirectLLM）
+  llm:
+    api-url: ${LLM_API_URL:https://maas.devops.xiaohongshu.com/v1/chat/completions}
+    api-key: ${LLM_API_KEY:QSTdde1351e160380c58908404509d9fea4}
+    model: ${LLM_MODEL:qwen3-vl-235b-a22b-instruct}
+    max-tokens: 16384
+    temperature: 0.9
