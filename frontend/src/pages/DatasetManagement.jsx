@@ -2,12 +2,13 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   Table, Button, Modal, Form, Input, Select, Space, Tag, Popconfirm,
   message, Drawer, Typography, Empty, Segmented, InputNumber, Alert, Spin,
-  Tooltip, Divider
+  Tooltip, Divider, Progress
 } from 'antd'
 import {
   PlusOutlined, DeleteOutlined,
   RobotOutlined, EditOutlined, ThunderboltOutlined, SearchOutlined,
-  SaveOutlined, PlusCircleOutlined, UndoOutlined
+  SaveOutlined, PlusCircleOutlined, UndoOutlined, LoadingOutlined,
+  CheckCircleOutlined
 } from '@ant-design/icons'
 import { datasetApis, apiApis, generateApis } from '../api'
 import JsonEditor from '../components/JsonEditor'
@@ -51,6 +52,12 @@ export default function DatasetManagement({ active }) {
   const [appendScenario, setAppendScenario] = useState('')
   const [appendCount, setAppendCount] = useState(5)
   const [appendGenerating, setAppendGenerating] = useState(false)
+
+  // ===== AI 生成进度状态（创建 & 追加共用结构） =====
+  const [generateProgress, setGenerateProgress] = useState(null)      // 创建时的进度
+  const [appendProgress, setAppendProgress] = useState(null)          // 追加时的进度
+  const abortRef = useRef(null)          // 创建时的 abort 函数
+  const appendAbortRef = useRef(null)    // 追加时的 abort 函数
 
   const loadApis = async () => {
     try {
@@ -126,6 +133,7 @@ export default function DatasetManagement({ active }) {
     form.setFieldsValue({ count: 10 })
     setCreateJsonText('[\n  \n]')
     setInputMode(llmConfigured ? 'ai' : 'manual')
+    setGenerateProgress(null)
     setModalOpen(true)
   }
 
@@ -194,33 +202,107 @@ export default function DatasetManagement({ active }) {
     setAppendScenario('')
     setAppendCount(5)
     setAppendMode(llmConfigured ? 'ai' : 'manual')
+    setAppendProgress(null)
     setAppendModalOpen(true)
   }
 
-  const handleAppendAiGenerate = async () => {
+  /**
+   * 根据后端推送的 progress 事件计算更真实的进度百分比。
+   * phase: "preparing" → 5-10%, "streaming" → 10-85%, "parsing" → 85-95%, "done" → 95%
+   * 多批模式下，每批占比 = 90% / totalBatches
+   */
+  const calcStreamingPercent = (p) => {
+    if (p.totalBatches > 1) {
+      // 多批：每批占一段区间
+      const batchSpan = 90 / p.totalBatches
+      const batchBase = 5 + (p.currentBatch - 1) * batchSpan
+      if (p.phase === 'preparing') return Math.round(batchBase)
+      if (p.phase === 'streaming') {
+        // streaming 阶段：用 receivedChars 做对数曲线映射（0→10%, ∞→80% 在批内）
+        const charProgress = Math.min(0.8, Math.log(1 + p.receivedChars / 100) / 5)
+        return Math.round(batchBase + batchSpan * (0.1 + charProgress))
+      }
+      if (p.phase === 'parsing') return Math.round(batchBase + batchSpan * 0.9)
+      if (p.phase === 'done') return Math.round(batchBase + batchSpan)
+      return Math.round(batchBase + batchSpan * 0.5)
+    }
+    // 单批
+    if (p.phase === 'preparing') return 5
+    if (p.phase === 'streaming') {
+      // 对数曲线：字符越多进度越慢增长，5% → 85%
+      const charProgress = Math.min(0.95, Math.log(1 + p.receivedChars / 100) / 5)
+      return Math.round(5 + 80 * charProgress)
+    }
+    if (p.phase === 'parsing') return 88
+    if (p.phase === 'done') return 95
+    return 50
+  }
+
+  // 追加 AI 生成 — 使用 SSE 流式接口
+  const handleAppendAiGenerate = () => {
     if (!viewingMeta?.apiId) {
       message.warning('该数据集未关联接口，无法使用 AI 生成')
       return
     }
+
     setAppendGenerating(true)
+    setAppendProgress({ message: '正在连接 AI 服务...', percent: 0 })
 
-    try {
-      const { data } = await generateApis.generate({
-        apiId: viewingMeta.apiId,
-        scenario: appendScenario,
-        count: appendCount,
-      })
-
-      if (data.data) {
-        setAppendText(JSON.stringify(data.data, null, 2))
-        message.success(`成功生成 ${data.count} 条数据，请确认后追加`)
+    const startTime = Date.now()
+    const abort = generateApis.generateStream(
+      { apiId: viewingMeta.apiId, scenario: appendScenario, count: appendCount },
+      {
+        onStart: (info) => {
+          setAppendProgress({
+            message: info.message,
+            percent: 5,
+            totalBatches: info.totalBatches,
+            targetCount: info.targetCount,
+          })
+        },
+        onProgress: (p) => {
+          const percent = calcStreamingPercent(p)
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0)
+          setAppendProgress({
+            message: p.message,
+            percent,
+            currentBatch: p.currentBatch,
+            totalBatches: p.totalBatches,
+            generatedCount: p.generatedCount,
+            targetCount: p.targetCount,
+            receivedChars: p.receivedChars,
+            phase: p.phase,
+            elapsed,
+          })
+        },
+        onComplete: (result) => {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
+          setAppendText(JSON.stringify(result.data, null, 2))
+          setAppendProgress({
+            message: `生成完成！共 ${result.count} 条数据，耗时 ${elapsed}s`,
+            percent: 100,
+            done: true,
+          })
+          message.success(`成功生成 ${result.count} 条数据，请确认后追加`)
+          setAppendGenerating(false)
+          setTimeout(() => setAppendProgress(null), 3000)
+        },
+        onError: (errMsg) => {
+          message.error(errMsg || 'AI 生成失败')
+          setAppendProgress(null)
+          setAppendGenerating(false)
+        },
       }
-    } catch (e) {
-      const errMsg = e.response?.data?.error || e.message || 'AI 生成失败'
-      message.error(errMsg)
-    } finally {
-      setAppendGenerating(false)
-    }
+    )
+    appendAbortRef.current = abort
+  }
+
+  // 取消追加时的生成
+  const handleCancelAppendGenerate = () => {
+    appendAbortRef.current?.()
+    setAppendGenerating(false)
+    setAppendProgress(null)
+    message.info('已取消生成')
   }
 
   const handleAppendSubmit = async () => {
@@ -264,30 +346,75 @@ export default function DatasetManagement({ active }) {
     }
   }
 
-  // AI 生成测试数据（创建时）
-  const handleGenerate = async () => {
-    try {
-      const apiId = form.getFieldValue('apiId')
-      const scenario = form.getFieldValue('scenario')
-      const count = form.getFieldValue('count') || 10
+  // AI 生成测试数据（创建时） — 使用 SSE 流式接口
+  const handleGenerate = () => {
+    const apiId = form.getFieldValue('apiId')
+    const scenario = form.getFieldValue('scenario')
+    const count = form.getFieldValue('count') || 10
 
-      if (!apiId) {
-        message.warning('请先选择所属接口')
-        return
-      }
-
-      setGenerating(true)
-      const { data } = await generateApis.generate({ apiId, scenario, count })
-
-      // 将生成的数据填入编辑器
-      setCreateJsonText(JSON.stringify(data.data, null, 2))
-      message.success(`成功生成 ${data.count} 条测试数据，请检查后保存`)
-    } catch (e) {
-      const errMsg = e.response?.data?.error || e.message || '生成失败'
-      message.error(errMsg)
-    } finally {
-      setGenerating(false)
+    if (!apiId) {
+      message.warning('请先选择所属接口')
+      return
     }
+
+    setGenerating(true)
+    setGenerateProgress({ message: '正在连接 AI 服务...', percent: 0 })
+
+    const startTime = Date.now()
+    const abort = generateApis.generateStream(
+      { apiId, scenario, count },
+      {
+        onStart: (info) => {
+          setGenerateProgress({
+            message: info.message,
+            percent: 5,
+            totalBatches: info.totalBatches,
+            targetCount: info.targetCount,
+          })
+        },
+        onProgress: (p) => {
+          const percent = calcStreamingPercent(p)
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0)
+          setGenerateProgress({
+            message: p.message,
+            percent,
+            currentBatch: p.currentBatch,
+            totalBatches: p.totalBatches,
+            generatedCount: p.generatedCount,
+            targetCount: p.targetCount,
+            receivedChars: p.receivedChars,
+            phase: p.phase,
+            elapsed,
+          })
+        },
+        onComplete: (result) => {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
+          setCreateJsonText(JSON.stringify(result.data, null, 2))
+          setGenerateProgress({
+            message: `生成完成！共 ${result.count} 条数据，耗时 ${elapsed}s`,
+            percent: 100,
+            done: true,
+          })
+          message.success(`成功生成 ${result.count} 条测试数据，请检查后保存`)
+          setGenerating(false)
+          setTimeout(() => setGenerateProgress(null), 3000)
+        },
+        onError: (errMsg) => {
+          message.error(errMsg || 'AI 生成失败')
+          setGenerateProgress(null)
+          setGenerating(false)
+        },
+      }
+    )
+    abortRef.current = abort
+  }
+
+  // 取消创建时的生成
+  const handleCancelGenerate = () => {
+    abortRef.current?.()
+    setGenerating(false)
+    setGenerateProgress(null)
+    message.info('已取消生成')
   }
 
   const handleSubmit = async () => {
@@ -487,7 +614,7 @@ export default function DatasetManagement({ active }) {
         title="创建数据集"
         open={modalOpen}
         onOk={handleSubmit}
-        onCancel={() => setModalOpen(false)}
+        onCancel={() => { abortRef.current?.(); setGenerating(false); setGenerateProgress(null); setModalOpen(false) }}
         width={1100}
         okText="保存数据集"
         cancelText="取消"
@@ -571,25 +698,92 @@ export default function DatasetManagement({ active }) {
                 </Form.Item>
                 <Space>
                   <Form.Item name="count" label="生成数量" style={{ marginBottom: 0 }}>
-                    <InputNumber min={1} max={100} disabled={!llmConfigured} style={{ width: 120 }} />
+                    <InputNumber min={1} max={100} disabled={!llmConfigured || generating} style={{ width: 120 }} />
                   </Form.Item>
                   <Form.Item label=" " style={{ marginBottom: 0 }}>
-                    <Button
-                      type="primary"
-                      icon={generating ? <Spin size="small" /> : <ThunderboltOutlined />}
-                      onClick={handleGenerate}
-                      loading={generating}
-                      disabled={!llmConfigured}
-                      style={{
-                        background: llmConfigured ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : undefined,
-                        border: 'none',
-                        fontWeight: 600,
-                      }}
-                    >
-                      {generating ? '生成中...' : 'AI 生成数据'}
-                    </Button>
+                    {!generating ? (
+                      <Button
+                        type="primary"
+                        icon={<ThunderboltOutlined />}
+                        onClick={handleGenerate}
+                        disabled={!llmConfigured}
+                        style={{
+                          background: llmConfigured ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : undefined,
+                          border: 'none',
+                          fontWeight: 600,
+                        }}
+                      >
+                        AI 生成数据
+                      </Button>
+                    ) : (
+                      <Button danger onClick={handleCancelGenerate}>
+                        取消生成
+                      </Button>
+                    )}
                   </Form.Item>
                 </Space>
+
+                {/* 生成进度提示 */}
+                {generateProgress && (
+                  <div style={{
+                    marginTop: 16,
+                    padding: '12px 16px',
+                    background: generateProgress.done ? '#f0fdf4' : '#f0f9ff',
+                    borderRadius: 10,
+                    border: `1px solid ${generateProgress.done ? '#bbf7d0' : '#bae6fd'}`,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      {generateProgress.done
+                        ? <CheckCircleOutlined style={{ color: '#16a34a', fontSize: 14 }} />
+                        : <LoadingOutlined style={{ color: '#6366f1', fontSize: 14 }} />
+                      }
+                      <span style={{
+                        fontSize: 13,
+                        color: generateProgress.done ? '#16a34a' : '#374151',
+                        fontWeight: 500,
+                      }}>
+                        {generateProgress.message}
+                      </span>
+                      {generateProgress.elapsed && !generateProgress.done && (
+                        <span style={{ fontSize: 12, color: '#9ca3af', marginLeft: 'auto' }}>
+                          已耗时 {generateProgress.elapsed}s
+                        </span>
+                      )}
+                    </div>
+                    <Progress
+                      percent={generateProgress.percent}
+                      size="small"
+                      showInfo={false}
+                      strokeColor={generateProgress.done
+                        ? '#16a34a'
+                        : { from: '#6366f1', to: '#8b5cf6' }
+                      }
+                      trailColor={generateProgress.done ? '#dcfce7' : '#e8e0ff'}
+                    />
+                    {!generateProgress.done && (
+                      <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
+                        <span>
+                          {generateProgress.totalBatches > 1 && (
+                            <>已完成 {generateProgress.generatedCount || 0} / {generateProgress.targetCount} 条
+                              {generateProgress.currentBatch && (
+                                <span style={{ marginLeft: 8 }}>
+                                  (第 {generateProgress.currentBatch}/{generateProgress.totalBatches} 批)
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </span>
+                        {generateProgress.phase === 'streaming' && generateProgress.receivedChars > 0 && (
+                          <span style={{ color: '#a5b4fc' }}>
+                            已接收 {generateProgress.receivedChars >= 1000
+                              ? (generateProgress.receivedChars / 1000).toFixed(1) + 'k'
+                              : generateProgress.receivedChars} 字符
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -765,7 +959,7 @@ export default function DatasetManagement({ active }) {
           </Space>
         }
         open={appendModalOpen}
-        onCancel={() => setAppendModalOpen(false)}
+        onCancel={() => { appendAbortRef.current?.(); setAppendGenerating(false); setAppendProgress(null); setAppendModalOpen(false) }}
         onOk={handleAppendSubmit}
         confirmLoading={saving}
         width={700}
@@ -831,27 +1025,94 @@ export default function DatasetManagement({ active }) {
                     min={1} max={100}
                     value={appendCount}
                     onChange={setAppendCount}
-                    disabled={!llmConfigured || !viewingMeta?.apiId}
+                    disabled={!llmConfigured || !viewingMeta?.apiId || appendGenerating}
                     style={{ width: 120 }}
                   />
                 </div>
                 <div style={{ paddingTop: 22 }}>
-                  <Button
-                    type="primary"
-                    icon={appendGenerating ? <Spin size="small" /> : <ThunderboltOutlined />}
-                    onClick={handleAppendAiGenerate}
-                    loading={appendGenerating}
-                    disabled={!llmConfigured || !viewingMeta?.apiId}
-                    style={{
-                      background: (llmConfigured && viewingMeta?.apiId) ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : undefined,
-                      border: 'none',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {appendGenerating ? '生成中...' : 'AI 生成'}
-                  </Button>
+                  {!appendGenerating ? (
+                    <Button
+                      type="primary"
+                      icon={<ThunderboltOutlined />}
+                      onClick={handleAppendAiGenerate}
+                      disabled={!llmConfigured || !viewingMeta?.apiId}
+                      style={{
+                        background: (llmConfigured && viewingMeta?.apiId) ? 'linear-gradient(135deg, #6366f1, #8b5cf6)' : undefined,
+                        border: 'none',
+                        fontWeight: 600,
+                      }}
+                    >
+                      AI 生成
+                    </Button>
+                  ) : (
+                    <Button danger onClick={handleCancelAppendGenerate}>
+                      取消生成
+                    </Button>
+                  )}
                 </div>
               </Space>
+
+              {/* 追加生成进度提示 */}
+              {appendProgress && (
+                <div style={{
+                  marginTop: 16,
+                  padding: '12px 16px',
+                  background: appendProgress.done ? '#f0fdf4' : '#f0f9ff',
+                  borderRadius: 10,
+                  border: `1px solid ${appendProgress.done ? '#bbf7d0' : '#bae6fd'}`,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    {appendProgress.done
+                      ? <CheckCircleOutlined style={{ color: '#16a34a', fontSize: 14 }} />
+                      : <LoadingOutlined style={{ color: '#6366f1', fontSize: 14 }} />
+                    }
+                    <span style={{
+                      fontSize: 13,
+                      color: appendProgress.done ? '#16a34a' : '#374151',
+                      fontWeight: 500,
+                    }}>
+                      {appendProgress.message}
+                    </span>
+                    {appendProgress.elapsed && !appendProgress.done && (
+                      <span style={{ fontSize: 12, color: '#9ca3af', marginLeft: 'auto' }}>
+                        已耗时 {appendProgress.elapsed}s
+                      </span>
+                    )}
+                  </div>
+                  <Progress
+                    percent={appendProgress.percent}
+                    size="small"
+                    showInfo={false}
+                    strokeColor={appendProgress.done
+                      ? '#16a34a'
+                      : { from: '#6366f1', to: '#8b5cf6' }
+                    }
+                    trailColor={appendProgress.done ? '#dcfce7' : '#e8e0ff'}
+                  />
+                  {!appendProgress.done && (
+                    <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
+                      <span>
+                        {appendProgress.totalBatches > 1 && (
+                          <>已完成 {appendProgress.generatedCount || 0} / {appendProgress.targetCount} 条
+                            {appendProgress.currentBatch && (
+                              <span style={{ marginLeft: 8 }}>
+                                (第 {appendProgress.currentBatch}/{appendProgress.totalBatches} 批)
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </span>
+                      {appendProgress.phase === 'streaming' && appendProgress.receivedChars > 0 && (
+                        <span style={{ color: '#a5b4fc' }}>
+                          已接收 {appendProgress.receivedChars >= 1000
+                            ? (appendProgress.receivedChars / 1000).toFixed(1) + 'k'
+                            : appendProgress.receivedChars} 字符
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

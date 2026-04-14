@@ -15,6 +15,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.*;
+import java.util.function.Consumer;
 
 @Service
 public class LlmService {
@@ -45,6 +46,195 @@ public class LlmService {
         String prompt = buildPrompt(api, scenario, count);
         String response = callLlm(prompt);
         return parseJsonArray(response);
+    }
+
+    /** 生成时的单批数量 */
+    private static final int GENERATE_BATCH_SIZE = 20;
+
+    /**
+     * 分批生成测试数据，通过回调推送每批进度。
+     * 当请求数量 > GENERATE_BATCH_SIZE 时，自动拆分为多批依次生成。
+     *
+     * @param progressCallback 每完成一批时调用，传入 GenerateProgress
+     */
+    public List<Map<String, Object>> generateTestDataBatched(
+            ApiDefinition api, String scenario, int count,
+            Consumer<GenerateProgress> progressCallback) throws Exception {
+
+        if (!llmConfig.isConfigured()) {
+            throw new IllegalStateException("大模型 API 未配置，请在 application.yml 中设置 app.llm.api-key");
+        }
+
+        // 小数据量不需要分批
+        if (count <= GENERATE_BATCH_SIZE) {
+            progressCallback.accept(new GenerateProgress(1, 1, 0, count,
+                    "正在构建 prompt...", "preparing", 0));
+
+            String prompt = buildPrompt(api, scenario, count);
+
+            // 使用流式调用，实时推送已接收字符数
+            String response = callLlmStreaming(prompt, receivedChars -> {
+                String msg = String.format("AI 正在生成中... 已接收 %d 字符", receivedChars);
+                progressCallback.accept(new GenerateProgress(1, 1, 0, count,
+                        msg, "streaming", receivedChars));
+            });
+
+            progressCallback.accept(new GenerateProgress(1, 1, 0, count,
+                    "正在解析生成结果...", "parsing", 0));
+            List<Map<String, Object>> result = parseJsonArray(response);
+            progressCallback.accept(new GenerateProgress(1, 1, result.size(), count,
+                    "生成完成", "done", 0));
+            return result;
+        }
+
+        // 大数据量：分批生成
+        int totalBatches = (int) Math.ceil((double) count / GENERATE_BATCH_SIZE);
+        List<Map<String, Object>> allResults = new ArrayList<>();
+        int remaining = count;
+
+        for (int batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+            int batchCount = Math.min(GENERATE_BATCH_SIZE, remaining);
+            remaining -= batchCount;
+
+            int batch = batchIdx + 1;
+            String statusMsg = String.format("正在生成第 %d/%d 批（本批 %d 条）...",
+                    batch, totalBatches, batchCount);
+            progressCallback.accept(new GenerateProgress(
+                    batch, totalBatches, allResults.size(), count, statusMsg, "preparing", 0));
+
+            log.info("生成第 {}/{} 批，本批 {} 条", batch, totalBatches, batchCount);
+
+            String prompt;
+            if (batchIdx == 0) {
+                prompt = buildPrompt(api, scenario, batchCount);
+            } else {
+                prompt = buildBatchGeneratePrompt(api, scenario, batchCount,
+                        allResults.subList(0, Math.min(3, allResults.size())),
+                        batch, totalBatches);
+            }
+
+            // 流式调用，实时推送字符进度
+            final int currentGenerated = allResults.size();
+            String response = callLlmStreaming(prompt, receivedChars -> {
+                String msg = String.format("第 %d/%d 批生成中... 已接收 %d 字符",
+                        batch, totalBatches, receivedChars);
+                progressCallback.accept(new GenerateProgress(
+                        batch, totalBatches, currentGenerated, count,
+                        msg, "streaming", receivedChars));
+            });
+
+            List<Map<String, Object>> batchResult = parseJsonArray(response);
+            allResults.addAll(batchResult);
+
+            // 当批完成时通知
+            if (batchIdx < totalBatches - 1) {
+                progressCallback.accept(new GenerateProgress(
+                        batch, totalBatches, allResults.size(), count,
+                        String.format("第 %d/%d 批完成（已生成 %d 条），准备下一批...",
+                                batch, totalBatches, allResults.size()),
+                        "done", 0));
+            }
+        }
+
+        progressCallback.accept(new GenerateProgress(
+                totalBatches, totalBatches, allResults.size(), count,
+                "全部生成完成", "done", 0));
+
+        log.info("分批生成完成，共 {} 批，合计 {} 条数据", totalBatches, allResults.size());
+        return allResults;
+    }
+
+    /**
+     * 后续批次的 prompt，提供已有样本避免内容重复
+     */
+    private String buildBatchGeneratePrompt(ApiDefinition api, String scenario, int count,
+                                             List<Map<String, Object>> existingSamples,
+                                             int batchNo, int totalBatches) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("你是一个测试数据生成专家。请根据以下接口信息和场景描述，生成测试数据。\n\n");
+
+        sb.append("## 接口信息\n");
+        sb.append("- 名称: ").append(api.getName()).append("\n");
+        sb.append("- URL: ").append(api.getMethod()).append(" ").append(api.getUrl()).append("\n");
+        if (api.getDescription() != null) {
+            sb.append("- 描述: ").append(api.getDescription()).append("\n");
+        }
+
+        if (api.getBodySchema() != null && !api.getBodySchema().isEmpty()) {
+            sb.append("\n## 请求体结构（示例模板）\n");
+            sb.append("以下是该接口的请求体 JSON 结构，请严格按照此结构生成每条测试数据：\n");
+            sb.append("```json\n");
+            try {
+                sb.append(objectMapper.writerWithDefaultPrettyPrinter()
+                        .writeValueAsString(api.getBodySchema()));
+            } catch (Exception e) {
+                sb.append(api.getBodySchema().toString());
+            }
+            sb.append("\n```\n");
+        }
+
+        sb.append("\n## 已有数据样本（请勿重复）\n");
+        sb.append("以下是已生成的部分数据样本，请确保新数据与这些不重复：\n");
+        sb.append("```json\n");
+        try {
+            sb.append(objectMapper.writerWithDefaultPrettyPrinter()
+                    .writeValueAsString(existingSamples));
+        } catch (Exception e) {
+            sb.append(existingSamples.toString());
+        }
+        sb.append("\n```\n");
+
+        sb.append("\n## 生成要求\n");
+        sb.append("- 当前是第 ").append(batchNo).append("/").append(totalBatches).append(" 批\n");
+        sb.append("- 场景描述: ").append(scenario != null && !scenario.isBlank() ? scenario : "通用测试场景").append("\n");
+        sb.append("- 本批生成数量: ").append(count).append(" 条\n");
+        sb.append("- 每条数据必须保持与请求体模板完全一致的 JSON 结构（包括嵌套对象）\n");
+        sb.append("- 每条数据的字段值需要有多样性，不要与已有数据重复\n");
+        sb.append("- 文本类字段要生成贴合真实业务场景的自然语言内容\n");
+        sb.append("- 适当穿插边界值（如特殊字符、emoji、较长文本）\n");
+
+        sb.append("\n## 输出格式\n");
+        sb.append("只输出一个 JSON 数组，不要包含任何其他文字、解释或 markdown 标记。\n");
+
+        return sb.toString();
+    }
+
+    /**
+     * 生成进度信息
+     */
+    public static class GenerateProgress {
+        private final int currentBatch;
+        private final int totalBatches;
+        private final int generatedCount;
+        private final int targetCount;
+        private final String message;
+        private final String phase;       // "preparing" | "streaming" | "parsing" | "done"
+        private final int receivedChars;  // streaming 阶段已接收的字符数
+
+        public GenerateProgress(int currentBatch, int totalBatches,
+                                int generatedCount, int targetCount, String message) {
+            this(currentBatch, totalBatches, generatedCount, targetCount, message, null, 0);
+        }
+
+        public GenerateProgress(int currentBatch, int totalBatches,
+                                int generatedCount, int targetCount, String message,
+                                String phase, int receivedChars) {
+            this.currentBatch = currentBatch;
+            this.totalBatches = totalBatches;
+            this.generatedCount = generatedCount;
+            this.targetCount = targetCount;
+            this.message = message;
+            this.phase = phase;
+            this.receivedChars = receivedChars;
+        }
+
+        public int getCurrentBatch() { return currentBatch; }
+        public int getTotalBatches() { return totalBatches; }
+        public int getGeneratedCount() { return generatedCount; }
+        public int getTargetCount() { return targetCount; }
+        public String getMessage() { return message; }
+        public String getPhase() { return phase; }
+        public int getReceivedChars() { return receivedChars; }
     }
 
     /** 单批最大条数阈值，超过则自动分批处理 */
@@ -386,6 +576,98 @@ public class LlmService {
 
         String content = choices.get(0).get("message").get("content").asText();
         log.info("LLM response length: {} chars", content.length());
+        return content;
+    }
+
+    /**
+     * 流式调用 LLM API（stream: true），逐 token 接收并通过 callback 回报已接收字符数。
+     * 这样前端可以实时看到 AI 正在持续生成内容。
+     *
+     * @param onCharsReceived 每收到一个 chunk 后回调，参数为当前总接收字符数
+     */
+    private String callLlmStreaming(String prompt, Consumer<Integer> onCharsReceived) throws Exception {
+        Map<String, Object> requestBody = new LinkedHashMap<>();
+        requestBody.put("model", llmConfig.getModel());
+        requestBody.put("max_tokens", llmConfig.getMaxTokens());
+        requestBody.put("temperature", llmConfig.getTemperature());
+        requestBody.put("stream", true);  // 启用流式
+
+        List<Map<String, String>> messages = new ArrayList<>();
+        messages.add(Map.of("role", "system", "content",
+                "你是一个专业的测试数据生成器。你只输出合法的 JSON 数组，不输出任何其他内容。"));
+        messages.add(Map.of("role", "user", "content", prompt));
+        requestBody.put("messages", messages);
+
+        String bodyJson = objectMapper.writeValueAsString(requestBody);
+
+        String apiUrl = llmConfig.getApiUrl().replaceAll("/+$", "");
+        if (!apiUrl.endsWith("/chat/completions")) {
+            apiUrl = apiUrl + "/chat/completions";
+        }
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(apiUrl))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + llmConfig.getApiKey())
+                .timeout(Duration.ofSeconds(120))
+                .POST(HttpRequest.BodyPublishers.ofString(bodyJson))
+                .build();
+
+        log.info("Calling LLM API (streaming): {} with model: {}", apiUrl, llmConfig.getModel());
+
+        // 用 InputStream 逐行读取 SSE 流
+        HttpResponse<java.io.InputStream> response = httpClient.send(request,
+                HttpResponse.BodyHandlers.ofInputStream());
+
+        if (response.statusCode() != 200) {
+            String errorBody = new String(response.body().readAllBytes());
+            log.error("LLM API error: {} - {}", response.statusCode(), errorBody);
+            throw new RuntimeException("大模型 API 调用失败: HTTP " + response.statusCode()
+                    + " - " + truncate(errorBody, 200));
+        }
+
+        StringBuilder contentBuilder = new StringBuilder();
+        long lastCallbackTime = 0;
+
+        try (var reader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(response.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (!line.startsWith("data:")) continue;
+
+                String data = line.substring(5).trim();
+                if ("[DONE]".equals(data)) break;
+
+                try {
+                    JsonNode chunk = objectMapper.readTree(data);
+                    JsonNode choices = chunk.get("choices");
+                    if (choices != null && !choices.isEmpty()) {
+                        JsonNode delta = choices.get(0).get("delta");
+                        if (delta != null && delta.has("content")) {
+                            String token = delta.get("content").asText();
+                            contentBuilder.append(token);
+
+                            // 限制回调频率：每 500ms 或每 200 字符回调一次
+                            long now = System.currentTimeMillis();
+                            if (now - lastCallbackTime >= 500 || contentBuilder.length() % 200 < token.length()) {
+                                onCharsReceived.accept(contentBuilder.length());
+                                lastCallbackTime = now;
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    // 忽略单行解析异常，继续处理下一行
+                    log.trace("Skipping unparseable streaming chunk: {}", data);
+                }
+            }
+        }
+
+        // 最终回调一次确保字符数准确
+        onCharsReceived.accept(contentBuilder.length());
+
+        String content = contentBuilder.toString();
+        log.info("LLM streaming response complete: {} chars", content.length());
         return content;
     }
 
